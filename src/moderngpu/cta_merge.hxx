@@ -11,10 +11,12 @@ MGPU_HOST_DEVICE int_t merge_path(a_keys_it a_keys, int_t a_count,
   b_keys_it b_keys, int_t b_count, int_t diag, comp_t comp) {
 
   typedef typename std::iterator_traits<a_keys_it>::value_type type_t;
+  constexpr const int n_tail = (sizeof(uint4) % sizeof(type_t) == 0) ? (sizeof(uint4) / sizeof(type_t)) : 1;
+
   int_t begin = max(int_t(0), (int_t)(diag - b_count));
   int_t end = min(diag, a_count);
 
-  while(begin < end) {
+  while(begin + n_tail <= end) {
     int_t mid = (begin + end) / 2;
     type_t a_key = a_keys[mid];
     type_t b_key = b_keys[diag - 1 - mid];
@@ -25,7 +27,40 @@ MGPU_HOST_DEVICE int_t merge_path(a_keys_it a_keys, int_t a_count,
     if(pred) begin = mid + 1;
     else end = mid;
   }
-  return begin;
+  if constexpr(n_tail > 1) {
+    union Tail {
+      uint4 raw_;
+      type_t vec_[n_tail];
+    };
+    Tail tail_a, tail_b;
+    tail_a.raw_ = *reinterpret_cast<const uint4*>(&(*(a_keys+begin)));
+    tail_b.raw_ = *reinterpret_cast<const uint4*>(&(*(b_keys+diag-1-end)));
+    if constexpr(bounds_upper == bounds) {
+      for(int_t mid=begin; mid<end; mid++) {
+        type_t a_key = tail_a.vec_[mid-begin];
+        type_t b_key = tail_b.vec_[end-mid];
+        bool pred = comp(a_key, b_key);
+        if(!pred) {
+          return mid;
+        }
+      }
+      return end;
+    }
+    else {
+      for(int_t mid=end-1; mid>=begin; mid--) {
+        type_t a_key = tail_a.vec_[mid-begin];
+        type_t b_key = tail_b.vec_[end-mid];
+        bool pred = !comp(b_key, a_key);
+        if(pred) {
+          return mid+1;
+        }
+      }
+      return begin;
+    }
+  }
+  else {
+    return begin;
+  }
 }
 
 template<bounds_t bounds, typename keys_it, typename comp_t>
@@ -74,7 +109,7 @@ load_two_streams_reg(const type_t* a, int a_count,
     x[i] = p[index];
   }, tid, a_count + b_count);
 
-  return x;  
+  return x;
 }
 
 template<int nt, int vt, typename type_t, typename a_it, typename b_it>
